@@ -16,7 +16,7 @@
 // Added include for <cassert> and "channel.h"
 // Changed argument `cpu` to `triggering_cpu`
 
-// Source code for configs 1 and 2
+// Source code for configs 1 and 2 
 
 #include "cache.h"
 #include <map>
