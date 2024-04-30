@@ -220,7 +220,7 @@ bool is_sample(uint32_t set) {
 
 
 // sampler
-std::vector<std::map<uint64_t, AddrInfo>> addr_history;
+std::vector<std::map<uint64_t, MyAddress>> addr_history;
 
 // Helper function for removing sampler entry
 void remove_old_sampler_entry(unsigned int sampler_set)
