@@ -191,7 +191,7 @@ uint8_t rrip[NUM_SETS][NUM_WAYS];
 
 // track the last access time for each set
 #define TIMER_MAX 1024
-uint64_t timers[NUM_SETS]
+uint64_t timers[NUM_SETS];
 
 // PCs in the cache
 uint64_t pc_matrix[NUM_SETS][NUM_WAYS];
@@ -208,7 +208,7 @@ OPTgen optgens[NUM_SETS];
 
 // determine whether the given set number is in the sample
 // set < 2048 == 1 << 11, so set has at most 11 bits
-// fix 5 bits
+// fix 5 bits, we have 6 free bits, so total 64 are sampled
 bool is_sample(uint32_t set) {
   unsigned long mask = 0b10101100100;
   return (set & mask) == mask;
@@ -217,6 +217,10 @@ bool is_sample(uint32_t set) {
 #define SAMPLED_CACHE_SIZE 2800
 #define SAMPLER_WAYS 8
 #define SAMPLER_SETS SAMPLED_CACHE_SIZE / SAMPLER_WAYS
+
+
+// sampler
+std::vector<std::map<uint64_t, AddrInfo>> addr_history;
 
 // Helper function for removing sampler entry
 void remove_old_sampler_entry(unsigned int sampler_set)
@@ -249,9 +253,6 @@ void age_sampler_entries(unsigned int sampler_set, unsigned int curr_age)
     }
   }
 }
-
-// sampler
-std::vector<std::map<uint64_t, AddrInfo>> addr_history;
 
 
 
@@ -341,11 +342,11 @@ void CACHE::update_replacement_state(uint32_t triggering_cpu, uint32_t set, uint
       bool wrap = (curr_time - addr_history[sampler_set][sampler_tag].last_time) > OV_LEN;
       uint64_t last_time = addr_history[sampler_set][sampler_tag].last_time % OV_LEN;
       if (!wrap && optgens[set].decide(curr_time, last_time)) {
-        predictor.increment(addr_history[sampler_set][sampler_tag].pc);
+        predictor->increment(addr_history[sampler_set][sampler_tag].pc);
       } else {
-        predictor.decrement(addr_history[sampler_set][sampler_tag].pc);
+        predictor->decrement(addr_history[sampler_set][sampler_tag].pc);
       }
-      
+
       optgens[set].add(curr_time);
       age_sampler_entries(sampler_set, addr_history[sampler_set][sampler_tag].age);
     } else {
@@ -356,8 +357,7 @@ void CACHE::update_replacement_state(uint32_t triggering_cpu, uint32_t set, uint
       optgens[set].add(curr_time);
       age_sampler_entries(sampler_set, SAMPLER_WAYS-1);
     }
-    
-    bool cache_friendly_ = predictor->predict(pc);
+
     addr_history[sampler_set][sampler_tag].update(timers[set], PC);
     addr_history[sampler_set][sampler_tag].age = 0;
     timers[set] = (timers[set] + 1) % TIMER_MAX;
