@@ -208,8 +208,8 @@ void CACHE::update_replacement_state(uint32_t triggering_cpu, uint32_t set, uint
       perset_optgen[set].add_access(curr_quanta);
       update_addr_history_lru(sampler_set, addr_history[sampler_set][sampler_tag].lru);
 
-      // Since this was a demand access, mark the prefetched bit as false
-      addr_history[sampler_set][sampler_tag].prefetched = false;
+    //   // Since this was a demand access, mark the prefetched bit as false
+    //   addr_history[sampler_set][sampler_tag].prefetched = false;
     }
     // This is the first time we are seeing this line (could be demand or prefetch)
     else if (addr_history[sampler_set].find(sampler_tag) == addr_history[sampler_set].end()) {
@@ -298,7 +298,7 @@ void CACHE::replacement_final_stats()
   std::cout << "OPTgen demand accesses: " << demand_accesses << std::endl;
 //   std::cout << "OPTgen prefetch accesses: " << prefetch_accesses << std::endl;
   std::cout << "OPTgen hits: " << hits << std::endl;
-  std::cout << "OPTgen hit rate: " << 100 * (double)hits / ((double)demand_accesses + (double)prefetch_accesses) << std::endl;
+  std::cout << "OPTgen hit rate: " << 100 * (double)hits / (double)demand_accesses << std::endl;
   std::cout << "Number of evictions: " << num_of_evictions << std::endl;
   std::cout << "Number of cache-friendly evictions: " << num_of_cache_friendly_evictions << std::endl;
 
