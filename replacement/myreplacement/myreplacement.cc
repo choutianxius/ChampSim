@@ -1,307 +1,390 @@
-// Hawkeye Cache Replacement Tool v2.0
-// UT AUSTIN RESEARCH LICENSE (SOURCE CODE)
-// The University of Texas at Austin has developed certain software and documentation that it desires to
-// make available without charge to anyone for academic, research, experimental or personal use.
-// This license is designed to guarantee freedom to use the software for these purposes. If you wish to
-// distribute or make other use of the software, you may purchase a license to do so from the University of
-// Texas.
-///////////////////////////////////////////////
-//                                            //
-//     Hawkeye [Jain and Lin, ISCA' 16]       //
-//     Akanksha Jain, akanksha@cs.utexas.edu  //
-//                                            //
-///////////////////////////////////////////////
-
-// Updated method names to remove the `llc_` prefix
-// Added include for <cassert> and "channel.h"
-// Changed argument `cpu` to `triggering_cpu`
-
-// Source code for configs 1 and 2
-
-#include <cassert>
+#include <cstdint>
 #include <map>
+#include <vector>
+#include <cassert>
+#include <math.h>
 
+// /inc/cache.sh
 #include "cache.h"
+// /inc/channel.h
 #include "channel.h"
 
-uint32_t PREFETCH = static_cast<unsigned>(access_type::PREFETCH);
-uint32_t WRITEBACK = static_cast<unsigned>(access_type::WRITE);
 
-#define NUM_CORE 1
-#define LLC_SETS NUM_CORE * 2048
-#define LLC_WAYS 16
 
-// 3-bit RRIP counters or all lines
-#define maxRRPV 7
-uint32_t rrpv[LLC_SETS][LLC_WAYS];
+/* begin: hawkeye predictor */
 
-// Per-set timers; we only use 64 of these
-// Budget = 64 sets * 1 timer per set * 10 bits per timer = 80 bytes
-#define TIMER_SIZE 1024
-uint64_t perset_mytimer[LLC_SETS];
+// implements the CRC32 algorithm
+// used in HawkeyePredictor make a hash for input addresses
+// reference: https://gist.github.com/timepp/1f678e200d9e0f2a043a9ec6b3690635
+uint64_t CRC32(uint64_t x) {
+  const unsigned long long P = 0xedb88320ULL;
+  unsigned long long output = x;
+  for (uint8_t i=0; i<32; i++) {
+    if ((output & 1) == 1) {
+      output = P ^ (output >> 1);
+    } else {
+      output = output >> 1;
+    }
+  }
+  return output;
+}
 
-// Signatures for sampled sets; we only use 64 of these
-// Budget = 64 sets * 16 ways * 12-bit signature per line = 1.5B
-uint64_t signatures[LLC_SETS][LLC_WAYS];
-// bool prefetched[LLC_SETS][LLC_WAYS];
+// use 11-bit hashes and 5-bit counters, as seen in 2017 paper
+#define HAWKEYE_PREDICTOR_HASH_LEN 11
+#define HAWKEYE_PREDICTOR_COUNTER_LEN 5
+// (1 << 5) - 1 == 31
+#define HAWKEYE_PREDICTOR_COUNTER_MAX 31
 
-// Hawkeye Predictors for demand and prefetch requests
-// Predictor with 2K entries and 5-bit counter per entry
-// Budget = 2048*5/8 bytes = 1.2KB
-#define MAX_SHCT 31
-#define SHCT_SIZE_BITS 11
-#define SHCT_SIZE (1 << SHCT_SIZE_BITS)
-#include "hawkeye_predictor.h"
-HAWKEYE_PC_PREDICTOR* demand_predictor; // Predictor
+// predict whether a given PC is cache-friendly/averse
+class HawkeyePredictor
+{
+// hashtable: pc hash => pc value
+std::map<uint64_t, short unsigned int> ht;
 
-#define OPTGEN_VECTOR_SIZE 128
-#include "optgen.h"
-OPTgen perset_optgen[LLC_SETS]; // per-set occupancy vectors; we only use 64 of these
+public:
+  void increment(uint64_t pc) {
+    uint64_t key = hash(pc);
 
-#include <math.h>
-#define bitmask(l) (((l) == 64) ? (unsigned long long)(-1LL) : ((1LL << (l)) - 1LL))
-#define bits(x, i, l) (((x) >> (i)) & bitmask(l))
-// Sample 64 sets per core
-#define SAMPLED_SET(set) (bits(set, 0, 6) == bits(set, ((unsigned long long)log2(LLC_SETS) - 6), 6))
+    // if not found, first set to half the maximum value (neutral)
+    if (ht.find(key) == ht.end()) {
+      ht[key] = (1 + HAWKEYE_PREDICTOR_COUNTER_MAX) / 2;
+    }
 
-// Sampler to track 8x cache history for sampled sets
-// 2800 entris * 4 bytes per entry = 11.2KB
+    // increment value, no exceeding maximum
+    if (ht[key] < HAWKEYE_PREDICTOR_COUNTER_MAX) {
+      ht[key] = ht[key] + 1;
+    }
+  }
+
+  void decrement(uint64_t pc) {
+    uint64_t key = hash(pc);
+
+    // if not found, first set to half the maximum value (neutral)
+    if (ht.find(key) == ht.end()) {
+      ht[key] = (1 + HAWKEYE_PREDICTOR_COUNTER_MAX) / 2;
+    }
+
+    // decrement value, no lower than 0
+    if (ht[key] > 0) {
+      ht[key] = ht[key] - 1;
+    }
+  }
+
+  bool predict(uint64_t pc) {
+    uint64_t key = hash(pc);
+
+    // if not found or greater than half the max, return true
+    if (ht.find(key) == ht.end()) {
+      return true;
+    }
+    if (ht[key] >= (HAWKEYE_PREDICTOR_COUNTER_MAX+1)/2) {
+      return true;
+    }
+    return false;
+  }
+
+private:
+  uint64_t hash(uint64_t pc) {
+    uint64_t hash_ = CRC32(pc) % (1 << HAWKEYE_PREDICTOR_HASH_LEN);
+    return hash_;
+  }
+};
+
+/* end: hawkeye predictor */
+
+
+/* begin: OPTgen */
+// 8 times of associativity, as seen in the papers
+#define OV_LEN 128
+
+struct OPTgen
+{
+  std::vector<unsigned int> ov; // occupancy vector
+  uint64_t capacity; // cache capacity
+
+  void init(uint64_t capacity_) {
+    capacity = capacity_;
+    ov.resize(OV_LEN, 0);
+  }
+
+  void add(uint64_t curr_time) {
+    ov[curr_time] = 0;
+  }
+
+  // decide whether the given line
+  // whose usage interval is [last_time, curr_time)
+  // should be cached under the OPT policy
+  bool decide(uint64_t curr_time, uint64_t last_time) {
+    bool should_cache = true;
+
+    // every element of ov in [last_time, curr_time)
+    // should be smaller than cache capacity
+    // if the given line should be cached
+    unsigned int i = last_time;
+    while (i != curr_time) {
+      if (ov[i] >= capacity) {
+        should_cache = false;
+        break;
+      }
+      i = (i+1) % ov.size();
+    }
+
+    if (should_cache) {
+      // increment ov[last_time: curr_time] by 1
+      // indicating the given line is cached
+      i = last_time;
+      while (i != curr_time) {
+        ov[i] = ov[i] + 1;
+        i = (i+1) % ov.size();
+      }
+      assert(i == curr_time);
+    }
+
+    return should_cache;
+  }
+};
+
+/* end: OPTgen */
+
+
+/* begin: MyAddress */
+
+// Sampler entry for access of a specific data address. 
+// In the actual sampler, the address will be denoted by the key of the map in which the sampler entry will reside in 
+struct MyAddress
+{
+    uint32_t last_time; // Last time this entry is accessed 
+    uint64_t pc; // The PC that accessed this entry
+    uint32_t age; // Age bits that to determine which entry to clear when the sampler is full
+
+    void init(unsigned int curr_quanta)
+    {
+        last_time = 0;
+        pc = 0;
+        age = 0;
+    }
+
+    // 
+    void update(unsigned int curr_time, uint64_t pc_)
+    {
+        last_time = curr_time;
+        pc = pc_;
+    }
+
+};
+
+/* end:  MyAddress*/
+
+
+
+
+/* begin: hawkeye main */
+// use 3-bit RRIP counters
+#define RRIP_MAX 7
+
+
+// champsim default configure
+// 2048 blocks, 16 ways
+#define NUM_SETS 2048
+#define NUM_WAYS 16
+uint8_t rrip[NUM_SETS][NUM_WAYS];
+
+// track the last access time for each set
+#define TIMER_MAX 1024
+uint64_t timers[NUM_SETS]
+
+// PCs in the cache
+uint64_t pc_matrix[NUM_SETS][NUM_WAYS];
+
+
+// predictor
+HawkeyePredictor* predictor;
+
+
+// optgen
+// one independent OPTgen for each set
+OPTgen optgens[NUM_SETS];
+
+
+// determine whether the given set number is in the sample
+// set < 2048 == 1 << 11, so set has at most 11 bits
+// fix 5 bits
+bool is_sample(uint32_t set) {
+  unsigned long mask = 0b10101100100;
+  return (set & mask) == mask;
+}
+
 #define SAMPLED_CACHE_SIZE 2800
 #define SAMPLER_WAYS 8
 #define SAMPLER_SETS SAMPLED_CACHE_SIZE / SAMPLER_WAYS
-vector<map<uint64_t, ADDR_INFO>> addr_history; // Sampler
 
-// sacusa: structures for additional data
-uint64_t num_of_evictions;
-uint64_t num_of_cache_friendly_evictions;
-
-// initialize replacement state
-void CACHE::initialize_replacement()
+// Helper function for removing sampler entry
+void remove_old_sampler_entry(unsigned int sampler_set)
 {
-  for (int i = 0; i < LLC_SETS; i++) {
-    for (int j = 0; j < LLC_WAYS; j++) {
-      rrpv[i][j] = maxRRPV;
-      signatures[i][j] = 0;
-      //   prefetched[i][j] = false;
-    }
-    perset_mytimer[i] = 0;
-    perset_optgen[i].init(LLC_WAYS - 2);
-  }
-
-  addr_history.resize(SAMPLER_SETS);
-  for (int i = 0; i < SAMPLER_SETS; i++)
-    addr_history[i].clear();
-
-  demand_predictor = new HAWKEYE_PC_PREDICTOR();
-
-  cout << "Initialize Hawkeye state" << endl;
-
-  // sacusa
-  num_of_evictions = 0;
-  num_of_cache_friendly_evictions = 0;
-}
-
-// find replacement victim
-// return value should be 0 ~ 15 or 16 (bypass)
-uint32_t CACHE::find_victim(uint32_t triggering_cpu, uint64_t instr_id, uint32_t set, const BLOCK* current_set, uint64_t PC, uint64_t paddr, uint32_t type)
-{
-  // sacusa: data to compute percentage of cache friendly evictions
-  num_of_evictions++;
-
-  // look for the maxRRPV line
-  for (uint32_t i = 0; i < LLC_WAYS; i++)
-    if (rrpv[set][i] == maxRRPV)
-      return i;
-
-  // If we cannot find a cache-averse line, we evict the oldest cache-friendly line
-  num_of_cache_friendly_evictions++;
-  uint32_t max_rrip = 0;
-  int32_t lru_victim = -1;
-  for (uint32_t i = 0; i < LLC_WAYS; i++) {
-    if (rrpv[set][i] >= max_rrip) {
-      max_rrip = rrpv[set][i];
-      lru_victim = i;
-    }
-  }
-
-  assert(lru_victim != -1);
-  // The predictor is trained negatively on LRU evictions
-  if (SAMPLED_SET(set)) {
-    demand_predictor->decrement(signatures[set][lru_victim]);
-  }
-  return lru_victim;
-
-  // WE SHOULD NOT REACH HERE
-  assert(0);
-  return 0;
-}
-
-void replace_addr_history_element(unsigned int sampler_set)
-{
-  uint64_t lru_addr = 0;
-
+  // index for the entry to remove
+  uint64_t remove_key = 0;
+  
+  // Iterate through all entries to find the oldest one and remove
   for (map<uint64_t, ADDR_INFO>::iterator it = addr_history[sampler_set].begin(); it != addr_history[sampler_set].end(); it++) {
-    //     uint64_t timer = (it->second).last_quanta;
-
     if ((it->second).lru == (SAMPLER_WAYS - 1)) {
-      // lru_time =  (it->second).last_quanta;
-      lru_addr = it->first;
+      remove_key = it->first;
       break;
     }
   }
 
-  addr_history[sampler_set].erase(lru_addr);
+  addr_history[sampler_set].erase(remove_key);
 }
 
-void update_addr_history_lru(unsigned int sampler_set, unsigned int curr_lru)
+// Helper function for aging sampler entries for determining which to evict when full with lru
+void age_sampler_entries(unsigned int sampler_set, unsigned int curr_age)
 {
   for (map<uint64_t, ADDR_INFO>::iterator it = addr_history[sampler_set].begin(); it != addr_history[sampler_set].end(); it++) {
-    if ((it->second).lru < curr_lru) {
-      (it->second).lru++;
-      assert((it->second).lru < SAMPLER_WAYS);
+    // Age all the entries that are later than a specific curr_age.
+    // Curr_age will be set to set to max value when a new entry is added so when full the highest will be exactly SAMPLER_WAYS - 1.
+    // Otherwise it will be called when accessing a specfic entry, with curr_age being the age of that entry, so that the entres younger than
+    // that can still be aged without messing with max value or the right order 
+    if ((it->second).age < curr_age) {
+      (it->second).age++;
+      assert((it->second).age < SAMPLER_WAYS);
     }
   }
 }
 
-// called on every cache hit and cache fill
-void CACHE::update_replacement_state(uint32_t triggering_cpu, uint32_t set, uint32_t way, uint64_t paddr, uint64_t PC, uint64_t victim_addr, uint32_t type,
-                                     uint8_t hit)
-{
-  paddr = (paddr >> 6) << 6;
+// sampler
+std::vector<std::map<uint64_t, AddrInfo>> addr_history;
 
-  //   if (type == PREFETCH) {
-  //     if (!hit)
-  //       prefetched[set][way] = true;
-  //   } else
-  //     prefetched[set][way] = false;
 
-  // Ignore writebacks
-  if (type == WRITEBACK)
+
+// CACHE implemenation
+// state initialization
+void CACHE::initialize_replacement() {
+  for (int i=0; i<NUM_SETS; i++) {
+    for (int j=0; j<NUM_WAYS; j++) {
+      // set all RRIP values to maximum
+      rrip[i][j] = RRIP_MAX;
+
+      pc_matrix[i][j] = 0;
+    }
+
+    timers[i] = 0;
+    optgens[i].init(NUM_WAYS-2);
+  }
+  
+  addr_history.resize(SAMPLER_SETS);
+  for (int i=0; i<SAMPLER_SETS; i++) {
+    addr_history[i].clear();
+  }
+  
+  predictor = new HawkeyePredictor();
+}
+
+// find the way index to evict
+// return NUM_WAYS to indicate no eviction
+uint32_t CACHE::find_victim(uint32_t triggering_cpu, uint64_t instr_id, uint32_t set, const BLOCK* current_set, uint64_t PC, uint64_t paddr, uint32_t type) {
+  // logic: find the most 'cache-averse' line to evict
+  // RRIP == 7 indicates cache-averse
+  // RRIP < 7 indicates cache-friendly
+  // first, try to find a first cache-averse line and evict it
+  // if no cache-averse, evict the oldest cache-friendly with LRU
+  // (largest RRIP)
+
+	// 1. try to find a cache-averse line (RRIP==7)
+  for (uint32_t i=0; i<NUM_WAYS; i++) {
+    if (rrip[set][i] == RRIP_MAX) {
+    	return i;
+    }
+  }
+  
+  // 2. cannot find a cache-averse line, evict largest RRIP
+  uint8_t rrip_max = -1; // hold current maximum of rrip
+  int32_t victim = -1;
+  for (uint32_t i=0; i<NUM_WAYS; i++) {
+    if (rrip[set][i] > rrip_max) {
+      rrip_max = rrip[set][i];
+      victim = i;
+    }
+  }
+
+  // train the predictor negatively for a PC evicted by LRU
+	if (is_sample(set)) {
+    predictor->decrement(pc_matrix[set][victim]);
+  }
+  return victim;
+}
+
+
+
+
+void CACHE::update_replacement_state(uint32_t triggering_cpu, uint32_t set, uint32_t way, uint64_t paddr, uint64_t PC, uint64_t victim_addr, uint32_t type, uint8_t hit) {
+	// do not update replacement state for writebacks
+  // check drrip.cc for the usage of access_type
+  if (access_type{type} == access_type::WRITE) {
     return;
+  }
+  
+  if (is_sample(set)) {
+  	paddr = (paddr >> 6) << 6; // wipe the least significant 6 bits
+    uint64_t curr_time = timers[set] % OV_LEN;
 
-  // If we are sampling, OPTgen will only see accesses from sampled sets
-  if (SAMPLED_SET(set)) {
-    // The current timestep
-    uint64_t curr_quanta = perset_mytimer[set] % OPTGEN_VECTOR_SIZE;
-
+    // calculate set and tag values in the sampled cache
     uint32_t sampler_set = (paddr >> 6) % SAMPLER_SETS;
-    uint64_t sampler_tag = CRC(paddr >> 12) % 256;
-    assert(sampler_set < SAMPLER_SETS);
+    uint64_t sampler_tag = CRC32(paddr >> 12) % 256;
 
-    // This line has been used before. Since the right end of a usage interval is always
-    // a demand, ignore prefetches
-    if ((addr_history[sampler_set].find(sampler_tag) != addr_history[sampler_set].end()) && (type != PREFETCH)) {
-      unsigned int curr_timer = perset_mytimer[set];
-      if (curr_timer < addr_history[sampler_set][sampler_tag].last_quanta)
-        curr_timer = curr_timer + TIMER_SIZE;
-      bool wrap = ((curr_timer - addr_history[sampler_set][sampler_tag].last_quanta) > OPTGEN_VECTOR_SIZE);
-      uint64_t last_quanta = addr_history[sampler_set][sampler_tag].last_quanta % OPTGEN_VECTOR_SIZE;
-      // and for prefetch hits, we train the last prefetch trigger PC
-      if (!wrap && perset_optgen[set].should_cache(curr_quanta, last_quanta)) {
-        demand_predictor->increment(addr_history[sampler_set][sampler_tag].PC);
+    if ((
+      addr_history[sampler_set].find(sampler_tag)
+      != addr_history[sampler_set].end()
+    )) {
+      unsigned int curr_time = timers[set];
+      if (curr_time < addr_history[sampler_set][sampler_tag].last_time) {
+        curr_time = curr_time + TIMER_MAX;
+      }
+      bool wrap = (curr_time - addr_history[sampler_set][sampler_tag].last_time) > OV_LEN;
+      uint64_t last_time = addr_history[sampler_set][sampler_tag].last_time % OV_LEN;
+      if (!wrap && optgens[set].decide(curr_time, last_time)) {
+        predictor.increment(addr_history[sampler_set][sampler_tag].pc);
       } else {
-        // Train the predictor negatively because OPT would not have cached this line
-
-        demand_predictor->decrement(addr_history[sampler_set][sampler_tag].PC);
+        predictor.decrement(addr_history[sampler_set][sampler_tag].pc);
       }
-      // Some maintenance operations for OPTgen
-      perset_optgen[set].add_access(curr_quanta);
-      update_addr_history_lru(sampler_set, addr_history[sampler_set][sampler_tag].lru);
-
-    //   // Since this was a demand access, mark the prefetched bit as false
-    //   addr_history[sampler_set][sampler_tag].prefetched = false;
+      
+      optgens[set].add(curr_time);
+      age_sampler_entries(sampler_set, addr_history[sampler_set][sampler_tag].age);
+    } else {
+      if (addr_history[sampler_set].size() == SAMPLER_WAYS) {
+        remove_old_sampler_entry(sampler_set);
+      }
+      addr_history[sampler_set][sampler_tag].init(curr_time);
+      optgens[set].add(curr_time);
+      age_sampler_entries(sampler_set, SAMPLER_WAYS-1);
     }
-    // This is the first time we are seeing this line (could be demand or prefetch)
-    else if (addr_history[sampler_set].find(sampler_tag) == addr_history[sampler_set].end()) {
-      // Find a victim from the sampled cache if we are sampling
-      if (addr_history[sampler_set].size() == SAMPLER_WAYS)
-        replace_addr_history_element(sampler_set);
-
-      assert(addr_history[sampler_set].size() < SAMPLER_WAYS);
-      // Initialize a new entry in the sampler
-      addr_history[sampler_set][sampler_tag].init(curr_quanta);
-      // If it's a prefetch, mark the prefetched bit;
-      //   if (type == PREFETCH) {
-      //     addr_history[sampler_set][sampler_tag].mark_prefetch();
-      //     perset_optgen[set].add_prefetch(curr_quanta);
-      //   } else
-      perset_optgen[set].add_access(curr_quanta);
-      update_addr_history_lru(sampler_set, SAMPLER_WAYS - 1);
-    }
-    // else // This line is a prefetch
-    // {
-    //   assert(addr_history[sampler_set].find(sampler_tag) != addr_history[sampler_set].end());
-    //   // if(hit && prefetched[set][way])
-    //   uint64_t last_quanta = addr_history[sampler_set][sampler_tag].last_quanta % OPTGEN_VECTOR_SIZE;
-    //   if (perset_mytimer[set] - addr_history[sampler_set][sampler_tag].last_quanta < 5 * NUM_CORE) {
-    //     if (perset_optgen[set].should_cache(curr_quanta, last_quanta)) {
-
-    //       demand_predictor->increment(addr_history[sampler_set][sampler_tag].PC);
-    //     }
-    //   }
-
-    //   // Mark the prefetched bit
-    //   addr_history[sampler_set][sampler_tag].mark_prefetch();
-    //   // Some maintenance operations for OPTgen
-    //   perset_optgen[set].add_prefetch(curr_quanta);
-    //   update_addr_history_lru(sampler_set, addr_history[sampler_set][sampler_tag].lru);
-    // }
-
-    // Get Hawkeye's prediction for this line
-    bool new_prediction = demand_predictor->get_prediction(PC);
-
-    // Update the sampler with the timestamp, PC and our prediction
-    // For prefetches, the PC will represent the trigger PC
-    addr_history[sampler_set][sampler_tag].update(perset_mytimer[set], PC, new_prediction);
-    addr_history[sampler_set][sampler_tag].lru = 0;
-    // Increment the set timer
-    perset_mytimer[set] = (perset_mytimer[set] + 1) % TIMER_SIZE;
+    
+    bool cache_friendly_ = predictor->predict(pc);
+    addr_history[sampler_set][sampler_tag].update(timers[set], PC);
+    addr_history[sampler_set][sampler_tag].age = 0;
+    timers[set] = (timers[set] + 1) % TIMER_MAX;
   }
 
-  bool new_prediction = demand_predictor->get_prediction(PC);
-
-  signatures[set][way] = PC;
-
-  // Set RRIP values and age cache-friendly line
-  if (!new_prediction)
-    rrpv[set][way] = maxRRPV;
-  else {
-    rrpv[set][way] = 0;
-    if (!hit) {
-      bool saturated = false;
-      for (uint32_t i = 0; i < LLC_WAYS; i++)
-        if (rrpv[set][i] == maxRRPV - 1)
-          saturated = true;
-
-      // Age all the cache-friendly  lines
-      for (uint32_t i = 0; i < LLC_WAYS; i++) {
-        if (!saturated && rrpv[set][i] < maxRRPV - 1)
-          rrpv[set][i]++;
+  bool cache_friendly = predictor->predict(PC);
+  if (!cache_friendly) {
+    // cache-averse, set RRIP to maximum
+    rrip[set][way] = RRIP_MAX;
+  } else {
+    // cache-friendly, age all other cache-friendly lines
+    // but only if no one will become cache-averse (RRIP < maximum)
+    bool should_age = true;
+    for (uint32_t i=0; i<NUM_WAYS; i++) {
+      if (rrip[set][i] == RRIP_MAX-1) {
+        should_age = false;
       }
     }
-    rrpv[set][way] = 0;
-  }
-}
-
-// use this function to print out your own stats at the end of simulation
-void CACHE::replacement_final_stats()
-{
-  unsigned int hits = 0;
-  unsigned int demand_accesses = 0;
-//   unsigned int prefetch_accesses = 0;
-  for (unsigned int i = 0; i < LLC_SETS; i++) {
-    demand_accesses += perset_optgen[i].demand_access;
-    // prefetch_accesses += perset_optgen[i].prefetch_access;
-    hits += perset_optgen[i].get_num_opt_hits();
+    
+    if (should_age) {
+      for (uint32_t i=0; i<NUM_WAYS; i++) {
+        if (rrip[set][i] < RRIP_MAX-1) {
+          rrip[set][i] = rrip[set][i] + 1;
+        }
+      }
+    }
   }
 
-  std::cout << "OPTgen demand accesses: " << demand_accesses << std::endl;
-//   std::cout << "OPTgen prefetch accesses: " << prefetch_accesses << std::endl;
-  std::cout << "OPTgen hits: " << hits << std::endl;
-  std::cout << "OPTgen hit rate: " << 100 * (double)hits / (double)demand_accesses << std::endl;
-  std::cout << "Number of evictions: " << num_of_evictions << std::endl;
-  std::cout << "Number of cache-friendly evictions: " << num_of_cache_friendly_evictions << std::endl;
-
-  cout << endl << endl;
-  return;
 }
+/* end: hawkeye main */
