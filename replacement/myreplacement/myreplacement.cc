@@ -220,7 +220,7 @@ bool is_sample(uint32_t set) {
 
 
 // sampler
-std::vector<std::map<uint64_t, MyAddress>> addr_history;
+std::vector<std::map<uint64_t, MyAddress> > addr_history;
 
 // Helper function for removing sampler entry
 void remove_old_sampler_entry(unsigned int sampler_set)
@@ -243,7 +243,7 @@ void remove_old_sampler_entry(unsigned int sampler_set)
 // Helper function for aging sampler entries for determining which to evict when full with lru
 void age_sampler_entries(unsigned int sampler_set, unsigned int curr_age)
 {
-  for (std::map<uint64_t, MyAddress>::iterator it = addr_history[sampler_set].begin(); it != addr_history[sampler_set].end(); it++) {
+  for (auto it = addr_history[sampler_set].begin(); it != addr_history[sampler_set].end(); it++) {
     // Age all the entries that are later than a specific curr_age.
     // Curr_age will be set to set to max value when a new entry is added so when full the highest will be exactly SAMPLER_WAYS - 1.
     // Otherwise it will be called when accessing a specfic entry, with curr_age being the age of that entry, so that the entres younger than
@@ -307,6 +307,7 @@ uint32_t CACHE::find_victim(uint32_t triggering_cpu, uint64_t instr_id, uint32_t
     }
   }
 
+  assert(victim != -1);
   // train the predictor negatively for a PC evicted by LRU
 	if (is_sample(set)) {
     predictor->decrement(pc_matrix[set][victim]);
@@ -388,4 +389,6 @@ void CACHE::update_replacement_state(uint32_t triggering_cpu, uint32_t set, uint
   }
 
 }
+
+void CACHE::replacement_final_stats() {}
 /* end: hawkeye main */
