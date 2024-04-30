@@ -230,7 +230,8 @@ void remove_old_sampler_entry(unsigned int sampler_set)
   
   // Iterate through all entries to find the oldest one and remove
   for (std::map<uint64_t, MyAddress>::iterator it = addr_history[sampler_set].begin(); it != addr_history[sampler_set].end(); it++) {
-    if ((it->second).lru == (SAMPLER_WAYS - 1)) {
+    // With the ways we update age (only increment all if adding new) when sampler is full, the oldest one will be exactly at SAMPLERWAYS-1
+    if ((it->second).age == (SAMPLER_WAYS - 1)) {
       remove_key = it->first;
       break;
     }
@@ -335,11 +336,11 @@ void CACHE::update_replacement_state(uint32_t triggering_cpu, uint32_t set, uint
       addr_history[sampler_set].find(sampler_tag)
       != addr_history[sampler_set].end()
     )) {
-      unsigned int curr_time = timers[set];
-      if (curr_time < addr_history[sampler_set][sampler_tag].last_time) {
-        curr_time = curr_time + TIMER_MAX;
+      unsigned int timer = timers[set];
+      if (timer < addr_history[sampler_set][sampler_tag].last_time) {
+        timer = timer + TIMER_MAX;
       }
-      bool wrap = (curr_time - addr_history[sampler_set][sampler_tag].last_time) > OV_LEN;
+      bool wrap = (timer - addr_history[sampler_set][sampler_tag].last_time) > OV_LEN;
       uint64_t last_time = addr_history[sampler_set][sampler_tag].last_time % OV_LEN;
       if (!wrap && optgens[set].decide(curr_time, last_time)) {
         predictor->increment(addr_history[sampler_set][sampler_tag].pc);
