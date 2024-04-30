@@ -27,7 +27,7 @@ using namespace std;
 
 struct ADDR_INFO
 {
-    uint64_t addr;
+    // uint64_t addr;
     uint32_t last_quanta;
     uint64_t PC; 
     // bool prefetched;
