@@ -43,7 +43,7 @@ uint64_t perset_mytimer[LLC_SETS];
 // Signatures for sampled sets; we only use 64 of these
 // Budget = 64 sets * 16 ways * 12-bit signature per line = 1.5B
 uint64_t signatures[LLC_SETS][LLC_WAYS];
-bool prefetched[LLC_SETS][LLC_WAYS];
+// bool prefetched[LLC_SETS][LLC_WAYS];
 
 // Hawkeye Predictors for demand and prefetch requests
 // Predictor with 2K entries and 5-bit counter per entry
@@ -82,7 +82,7 @@ void CACHE::initialize_replacement()
     for (int j = 0; j < LLC_WAYS; j++) {
       rrpv[i][j] = maxRRPV;
       signatures[i][j] = 0;
-      prefetched[i][j] = false;
+      //   prefetched[i][j] = false;
     }
     perset_mytimer[i] = 0;
     perset_optgen[i].init(LLC_WAYS - 2);
@@ -169,11 +169,11 @@ void CACHE::update_replacement_state(uint32_t triggering_cpu, uint32_t set, uint
 {
   paddr = (paddr >> 6) << 6;
 
-  if (type == PREFETCH) {
-    if (!hit)
-      prefetched[set][way] = true;
-  } else
-    prefetched[set][way] = false;
+  //   if (type == PREFETCH) {
+  //     if (!hit)
+  //       prefetched[set][way] = true;
+  //   } else
+  //     prefetched[set][way] = false;
 
   // Ignore writebacks
   if (type == WRITEBACK)
@@ -221,30 +221,31 @@ void CACHE::update_replacement_state(uint32_t triggering_cpu, uint32_t set, uint
       // Initialize a new entry in the sampler
       addr_history[sampler_set][sampler_tag].init(curr_quanta);
       // If it's a prefetch, mark the prefetched bit;
-      if (type == PREFETCH) {
-        addr_history[sampler_set][sampler_tag].mark_prefetch();
-        perset_optgen[set].add_prefetch(curr_quanta);
-      } else
-        perset_optgen[set].add_access(curr_quanta);
+      //   if (type == PREFETCH) {
+      //     addr_history[sampler_set][sampler_tag].mark_prefetch();
+      //     perset_optgen[set].add_prefetch(curr_quanta);
+      //   } else
+      perset_optgen[set].add_access(curr_quanta);
       update_addr_history_lru(sampler_set, SAMPLER_WAYS - 1);
-    } else // This line is a prefetch
-    {
-      assert(addr_history[sampler_set].find(sampler_tag) != addr_history[sampler_set].end());
-      // if(hit && prefetched[set][way])
-      uint64_t last_quanta = addr_history[sampler_set][sampler_tag].last_quanta % OPTGEN_VECTOR_SIZE;
-      if (perset_mytimer[set] - addr_history[sampler_set][sampler_tag].last_quanta < 5 * NUM_CORE) {
-        if (perset_optgen[set].should_cache(curr_quanta, last_quanta)) {
-
-          demand_predictor->increment(addr_history[sampler_set][sampler_tag].PC);
-        }
-      }
-
-      // Mark the prefetched bit
-      addr_history[sampler_set][sampler_tag].mark_prefetch();
-      // Some maintenance operations for OPTgen
-      perset_optgen[set].add_prefetch(curr_quanta);
-      update_addr_history_lru(sampler_set, addr_history[sampler_set][sampler_tag].lru);
     }
+    // else // This line is a prefetch
+    // {
+    //   assert(addr_history[sampler_set].find(sampler_tag) != addr_history[sampler_set].end());
+    //   // if(hit && prefetched[set][way])
+    //   uint64_t last_quanta = addr_history[sampler_set][sampler_tag].last_quanta % OPTGEN_VECTOR_SIZE;
+    //   if (perset_mytimer[set] - addr_history[sampler_set][sampler_tag].last_quanta < 5 * NUM_CORE) {
+    //     if (perset_optgen[set].should_cache(curr_quanta, last_quanta)) {
+
+    //       demand_predictor->increment(addr_history[sampler_set][sampler_tag].PC);
+    //     }
+    //   }
+
+    //   // Mark the prefetched bit
+    //   addr_history[sampler_set][sampler_tag].mark_prefetch();
+    //   // Some maintenance operations for OPTgen
+    //   perset_optgen[set].add_prefetch(curr_quanta);
+    //   update_addr_history_lru(sampler_set, addr_history[sampler_set][sampler_tag].lru);
+    // }
 
     // Get Hawkeye's prediction for this line
     bool new_prediction = demand_predictor->get_prediction(PC);
@@ -287,15 +288,15 @@ void CACHE::replacement_final_stats()
 {
   unsigned int hits = 0;
   unsigned int demand_accesses = 0;
-  unsigned int prefetch_accesses = 0;
+//   unsigned int prefetch_accesses = 0;
   for (unsigned int i = 0; i < LLC_SETS; i++) {
     demand_accesses += perset_optgen[i].demand_access;
-    prefetch_accesses += perset_optgen[i].prefetch_access;
+    // prefetch_accesses += perset_optgen[i].prefetch_access;
     hits += perset_optgen[i].get_num_opt_hits();
   }
 
   std::cout << "OPTgen demand accesses: " << demand_accesses << std::endl;
-  std::cout << "OPTgen prefetch accesses: " << prefetch_accesses << std::endl;
+//   std::cout << "OPTgen prefetch accesses: " << prefetch_accesses << std::endl;
   std::cout << "OPTgen hits: " << hits << std::endl;
   std::cout << "OPTgen hit rate: " << 100 * (double)hits / ((double)demand_accesses + (double)prefetch_accesses) << std::endl;
   std::cout << "Number of evictions: " << num_of_evictions << std::endl;

@@ -30,14 +30,14 @@ struct ADDR_INFO
     uint64_t addr;
     uint32_t last_quanta;
     uint64_t PC; 
-    bool prefetched;
+    // bool prefetched;
     uint32_t lru;
 
     void init(unsigned int curr_quanta)
     {
         last_quanta = 0;
         PC = 0;
-        prefetched = false;
+        // prefetched = false;
         lru = 0;
     }
 
@@ -47,10 +47,10 @@ struct ADDR_INFO
         PC = _pc;
     }
 
-    void mark_prefetch()
-    {
-        prefetched = true;
-    }
+    // void mark_prefetch()
+    // {
+    //     prefetched = true;
+    // }
 };
 
 struct OPTgen
@@ -60,7 +60,7 @@ struct OPTgen
     uint64_t num_cache;
     uint64_t num_dont_cache;
     uint64_t demand_access;
-    uint64_t prefetch_access;
+    // uint64_t prefetch_access;
 
     uint64_t CACHE_SIZE;
 
@@ -69,7 +69,7 @@ struct OPTgen
         num_cache = 0;
         num_dont_cache = 0;
         demand_access = 0;
-        prefetch_access = 0;
+        // prefetch_access = 0;
         CACHE_SIZE = size;
         liveness_history.resize(OPTGEN_VECTOR_SIZE, 0);
     }
@@ -80,11 +80,11 @@ struct OPTgen
         liveness_history[curr_quanta] = 0;
     }
 
-    void add_prefetch(uint64_t curr_quanta)
-    {
-        prefetch_access++;
-        liveness_history[curr_quanta] = 0;
-    }
+    // void add_prefetch(uint64_t curr_quanta)
+    // {
+    //     prefetch_access++;
+    //     liveness_history[curr_quanta] = 0;
+    // }
 
     bool should_cache(uint64_t curr_quanta, uint64_t last_quanta)
     {
