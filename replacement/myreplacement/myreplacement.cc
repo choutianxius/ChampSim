@@ -229,7 +229,7 @@ void remove_old_sampler_entry(unsigned int sampler_set)
   uint64_t remove_key = 0;
   
   // Iterate through all entries to find the oldest one and remove
-  for (map<uint64_t, ADDR_INFO>::iterator it = addr_history[sampler_set].begin(); it != addr_history[sampler_set].end(); it++) {
+  for (std::map<uint64_t, ADDR_INFO>::iterator it = addr_history[sampler_set].begin(); it != addr_history[sampler_set].end(); it++) {
     if ((it->second).lru == (SAMPLER_WAYS - 1)) {
       remove_key = it->first;
       break;
@@ -242,7 +242,7 @@ void remove_old_sampler_entry(unsigned int sampler_set)
 // Helper function for aging sampler entries for determining which to evict when full with lru
 void age_sampler_entries(unsigned int sampler_set, unsigned int curr_age)
 {
-  for (map<uint64_t, ADDR_INFO>::iterator it = addr_history[sampler_set].begin(); it != addr_history[sampler_set].end(); it++) {
+  for (std::map<uint64_t, ADDR_INFO>::iterator it = addr_history[sampler_set].begin(); it != addr_history[sampler_set].end(); it++) {
     // Age all the entries that are later than a specific curr_age.
     // Curr_age will be set to set to max value when a new entry is added so when full the highest will be exactly SAMPLER_WAYS - 1.
     // Otherwise it will be called when accessing a specfic entry, with curr_age being the age of that entry, so that the entres younger than
