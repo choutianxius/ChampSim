@@ -1,3 +1,5 @@
+// /replacement/myreplacement/myreplacement.cc
+
 #include <cstdint>
 #include <map>
 #include <vector>
@@ -164,7 +166,7 @@ struct MyAddress
         age = 0;
     }
 
-    // 
+    // update the last accessed timestamp
     void update(unsigned int curr_time, uint64_t pc_)
     {
         last_time = curr_time;
@@ -207,11 +209,8 @@ OPTgen optgens[NUM_SETS];
 
 
 // determine whether the given set number is in the sample
-// set < 2048 == 1 << 11, so set has at most 11 bits
-// fix 5 bits, we have 6 free bits, so total 64 are sampled
 bool is_sample(uint32_t set) {
-  unsigned long mask = 0b10101100100;
-  return (set & mask) == mask;
+  return ((set >> 5) & 63L) == (set & 63L);
 }
 
 #define SAMPLED_CACHE_SIZE 2800
@@ -229,8 +228,7 @@ void remove_old_sampler_entry(unsigned int sampler_set)
   uint64_t remove_key = 0;
   
   // Iterate through all entries to find the oldest one and remove
-  for (std::map<uint64_t, MyAddress>::iterator it = addr_history[sampler_set].begin(); it != addr_history[sampler_set].end(); it++) {
-    // With the ways we update age (only increment all if adding new) when sampler is full, the oldest one will be exactly at SAMPLERWAYS-1
+  for (auto it = addr_history[sampler_set].begin(); it != addr_history[sampler_set].end(); it++) {
     if ((it->second).age == (SAMPLER_WAYS - 1)) {
       remove_key = it->first;
       break;
@@ -324,7 +322,9 @@ void CACHE::update_replacement_state(uint32_t triggering_cpu, uint32_t set, uint
   if (access_type{type} == access_type::WRITE) {
     return;
   }
-  
+
+  // if the set is in the sample sets,
+  // we may also use it to train the predictor
   if (is_sample(set)) {
   	paddr = (paddr >> 6) << 6; // wipe the least significant 6 bits
     uint64_t curr_time = timers[set] % OV_LEN;
@@ -333,6 +333,9 @@ void CACHE::update_replacement_state(uint32_t triggering_cpu, uint32_t set, uint
     uint32_t sampler_set = (paddr >> 6) % SAMPLER_SETS;
     uint64_t sampler_tag = CRC32(paddr >> 12) % 256;
 
+    // we find the current memory reference in history,
+    // so this is its second access
+    // and we train the predictor
     if ((
       addr_history[sampler_set].find(sampler_tag)
       != addr_history[sampler_set].end()
@@ -341,8 +344,10 @@ void CACHE::update_replacement_state(uint32_t triggering_cpu, uint32_t set, uint
       if (timer < addr_history[sampler_set][sampler_tag].last_time) {
         timer = timer + TIMER_MAX;
       }
+
       bool wrap = (timer - addr_history[sampler_set][sampler_tag].last_time) > OV_LEN;
       uint64_t last_time = addr_history[sampler_set][sampler_tag].last_time % OV_LEN;
+
       if (!wrap && optgens[set].decide(curr_time, last_time)) {
         predictor->increment(addr_history[sampler_set][sampler_tag].pc);
       } else {
@@ -352,7 +357,12 @@ void CACHE::update_replacement_state(uint32_t triggering_cpu, uint32_t set, uint
       optgens[set].add(curr_time);
       age_sampler_entries(sampler_set, addr_history[sampler_set][sampler_tag].age);
     } else {
+      // we cannot find the memory reference in history
+      // so it's the first time access
+      // and we don't train the predictor
+
       if (addr_history[sampler_set].size() == SAMPLER_WAYS) {
+        // make space if sampled set is full
         remove_old_sampler_entry(sampler_set);
       }
       addr_history[sampler_set][sampler_tag].init(curr_time);
